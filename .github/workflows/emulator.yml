@@ -1,0 +1,60 @@
+name: AOSP emulator boot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Boot AOSP emulator and run probe
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: default
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: -no-window -no-audio -gpu swiftshader_indirect -enable-kvm
+          disable-animations: true
+          script: |
+            set -u
+            mkdir -p probe
+            adb wait-for-device
+            BOOT="$(adb shell getprop sys.boot_completed | tr -d '\r')"
+            echo "sys.boot_completed=${BOOT}"
+            test "${BOOT}" = "1"
+            FINGERPRINT="$(adb shell getprop ro.build.fingerprint | tr -d '\r')"
+            echo "ro.build.fingerprint=${FINGERPRINT}"
+            adb logcat -d > logcat.txt 2>&1 || true
+            adb shell dumpsys role > dumpsys_role.txt 2>&1 || true
+            if [ -x probe/assistant_role_probe.sh ]; then
+              bash probe/assistant_role_probe.sh > probe/probe_stdout.log 2> probe/probe_stderr.log || true
+            else
+              echo "probe script not present yet" | tee probe/probe_stdout.log
+              : > probe/probe_stderr.log
+            fi
+            echo "BOOT_OK=1" > probe/boot.txt
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-artifacts
+          if-no-files-found: error
+          path: |
+            logcat.txt
+            dumpsys_role.txt
+            probe/
